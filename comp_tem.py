@@ -34,7 +34,11 @@ class TemperatureProfileAnalyzer:
         self._load_grid_data()
         
         if ref_dirname:
-            self._load_reference_data()
+            if self.min_angle is None or self.max_angle is None:
+                self._load_reference_data()
+            else:
+                self._load_2D_reference_data()
+                self.T_ref = 0.5*self.Tpar_2D_ref + 0.5 * self.Tperp_2D_ref
     
     def _load_grid_data(self):
         """Load radial grid and normalization parameters"""
@@ -60,30 +64,30 @@ class TemperatureProfileAnalyzer:
             # Setup angle analysis
             self._setup_angle_analysis()
 
-        def _setup_angle_analysis(self):
-            """Setup angle indices for analysis"""
-            angles_rad = self.bal_ang[:, 0]  # Use angles from the first radial point
+    def _setup_angle_analysis(self):
+        """Setup angle indices for analysis"""
+        angles_rad = self.bal_ang[:, 0]  # Use angles from the first radial point
 
-            # Convert degree range to radians
-            min_angle_rad = np.deg2rad(self.min_angle)
-            max_angle_rad = np.deg2rad(self.max_angle)
+        # Convert degree range to radians
+        min_angle_rad = np.deg2rad(self.min_angle)
+        max_angle_rad = np.deg2rad(self.max_angle)
 
-            # Normalize angles and range to [0, 2*pi) for robust comparison
-            angles_norm = angles_rad % (2 * np.pi)
-            min_angle_norm = min_angle_rad % (2 * np.pi)
-            max_angle_norm = max_angle_rad % (2 * np.pi)
+        # Normalize angles and range to [0, 2*pi) for robust comparison
+        angles_norm = angles_rad % (2 * np.pi)
+        min_angle_norm = min_angle_rad % (2 * np.pi)
+        max_angle_norm = max_angle_rad % (2 * np.pi)
 
-            if min_angle_norm <= max_angle_norm:
-            # Normal case: min_angle <= angles <= max_angle
-                angle_mask = (angles_norm >= min_angle_norm) & (angles_norm <= max_angle_norm)
-            else:
-            # Wrap-around case: angles >= min_angle OR angles <= max_angle
-                angle_mask = (angles_norm >= min_angle_norm) | (angles_norm <= max_angle_norm)
+        if min_angle_norm <= max_angle_norm:
+        # Normal case: min_angle <= angles <= max_angle
+            angle_mask = (angles_norm >= min_angle_norm) & (angles_norm <= max_angle_norm)
+        else:
+        # Wrap-around case: angles >= min_angle OR angles <= max_angle
+            angle_mask = (angles_norm >= min_angle_norm) | (angles_norm <= max_angle_norm)
 
-            self.angle_indices = np.where(angle_mask)[0]
+        self.angle_indices = np.where(angle_mask)[0]
 
-            if len(self.angle_indices) == 0:
-                print(f"Warning: No angles found in the specified range [{self.min_angle_deg}, {self.max_angle_deg}] degrees.")
+        if len(self.angle_indices) == 0:
+            print(f"Warning: No angles found in the specified range [{self.min_angle_deg}, {self.max_angle_deg}] degrees.")
 
     
     def _load_reference_data(self):
@@ -98,8 +102,8 @@ class TemperatureProfileAnalyzer:
         Ppar_2D, Pperp_2D, n_2D = mylib.read_data(
                 self.ref_dirname, "PparGC_rtheta", "PperpGC_rtheta", "densGC_rtheta", t1=self.ref_time
         )
-        self.Tpar_2D_ref  = Ppar_2D  / n_2D
-        self.Tperp_2D_ref = Pperp_2D / n_2D
+        self.Tpar_2D_ref  = np.mean((Ppar_2D  / n_2D)[self.angle_indices, :], axis=0)
+        self.Tperp_2D_ref = np.mean((Pperp_2D / n_2D)[self.angle_indices, :], axis=0)
     
     def calc_temperature_profile(self, timesteps: List[int]) -> Tuple[np.ndarray, float]:
         """
@@ -164,10 +168,10 @@ class TemperatureProfileAnalyzer:
                 Ti_perp_avg += Ti_perp
 
         Ti_par_avg /= len(timesteps)
-        Ti_par_avg = np.mean(Ti_par_avg[self.angle_indices, self.xind], axis = 0)
+        Ti_par_avg = np.mean(Ti_par_avg[self.angle_indices, :][:, self.xind], axis = 0)
         
         Ti_perp_avg /= len(timesteps)
-        Ti_perp_avg = np.mean(Ti_perp_avg[self.angle_indices, self.xind], axis = 0)
+        Ti_perp_avg = np.mean(Ti_perp_avg[self.angle_indices, :][:, self.xind], axis = 0)
 
         return Ti_par_avg, Ti_perp_avg, tdiag 
         
@@ -204,7 +208,7 @@ class TemperatureProfileAnalyzer:
                 'time_diag', t1=timestep
             )
             Q_total = Q_par + Q_perp
-            Q_theta_avg = np.mean(Q_total, axis=0)
+            Q_theta_avg = np.mean(Q_total[self.angle_indices, :], axis=0)
             
             if Q_avg is None:
                 Q_avg = Q_theta_avg
@@ -264,6 +268,7 @@ class MultiCaseComparison:
         for dirname in dirnames:
             analyzer = TemperatureProfileAnalyzer(
                 dirname, ref_dirname=ref_dirname, r_min=r_min, r_max=r_max,
+                min_angle=min_angle, max_angle=max_angle,
                 ref_time=ref_time
             )
             self.analyzers.append(analyzer)
@@ -293,7 +298,11 @@ class MultiCaseComparison:
         fig, ax = plt.subplots(figsize=(10, 7))
         
         for analyzer, label, color in zip(self.analyzers, self.labels, colors):
-            Ti_avg, tdiag = analyzer.calc_temperature_profile(timesteps)
+            if analyzer.min_angle is None or analyzer.max_angle is None:
+                Ti_avg, tdiag = analyzer.calc_temperature_profile(timesteps)
+            else:
+                Ti_par_avg, Ti_perp_avg, tdiag = analyzer.calc_2D_temperature_profile(timesteps)
+                Ti_avg = 0.5* Ti_par_avg  + 0.5 * Ti_perp_avg
             
             if plot_type == 'absolute':
                 y_data = Ti_avg
@@ -326,7 +335,7 @@ class MultiCaseComparison:
         ax.set_ylabel(ylabel, size=font_size+2)
         # ax.set_title(title, size=font_size+4)
         ax.set_xlim(left=0, right=self.rg[-1])
-        ax.set_ylim(-0.15, 0.4)
+        # ax.set_ylim(-0.15, 0.4)
         ax.legend(fontsize=font_size-2, loc='upper left')
         ax.tick_params(labelsize=font_size)
         ax.grid(True, alpha=0.3)
@@ -411,6 +420,10 @@ if __name__ == "__main__":
                        help='Minimum normalized radius')
     parser.add_argument('--r_max', type=float, default=1.8,
                        help='Maximum normalized radius')
+    parser.add_argument('--min_angle', type=float, default=None,
+                       help='Minimum ballooning angle (degrees)')
+    parser.add_argument('--max_angle', type=float, default=None,
+                       help='Maximum ballooning angle (degrees)')
     
     # Plot options
     parser.add_argument('--plot_type', type=str, default='difference',
@@ -456,6 +469,8 @@ if __name__ == "__main__":
         ref_dirname=args.ref_dir,
         r_min=args.r_min,
         r_max=args.r_max,
+        min_angle=args.min_angle,
+        max_angle=args.max_angle,
         ref_time=args.ref_time
     )
     
