@@ -29,56 +29,50 @@ class Reynolds_stress_analyzer:
         
     def _load_common_data(self):
         """Load grid and geometry data"""
-        # Radial grid
-        self.rg = mylib.read_data(self.dirname, 'rg')
-        self.rhostar = mylib.read_data(self.dirname, 'rhostar')
-        self.rg *= self.rhostar
-        
-        # Apply radial mask
-        self.rmask = (self.rg >= self.r_min) & (self.rg <= self.r_max)
-        self.rg = self.rg[self.rmask]
-        
-        # Normalization parameters
-        self.R0, self.Ts0 = mylib.read_data(self.dirname, 'R0', 'Ts0')
-        self.R0 *= self.rhostar
-        
-        # Angular grid
-        self.thg = mylib.read_data(self.dirname, 'thetag')
-        
-        # Geometry
-        self.jacob_space = mylib.read_data(self.dirname, 'jacob_space')
-        self.B = mylib.read_data(self.dirname, 'B')
-        
-        # Apply mask to geometry arrays if needed
-        if self.jacob_space.ndim > 1:
-            self.jacob_space = self.jacob_space[:, self.rmask]
-        if self.B.ndim > 1:
-            self.B = self.B[:, self.rmask]
-        
+        # Use mylib function to load normalized grid
+        grid_data = mylib.load_normalized_grid(
+            self.dirname,
+            spnum=self.spnum,
+            r_min=self.r_min,
+            r_max=self.r_max,
+            return_mask=True
+        )
+
+        self.rg = grid_data['rg']
+        self.R0 = grid_data['R0']
+        self.rhostar = grid_data['rhostar']
+        self.rmask = grid_data['mask']
+
+        # Additional parameters
+        self.Ts0 = mylib.read_data(self.dirname, 'Ts0', spnum=self.spnum)
+
+        # Use mylib function to load geometry data
+        geom_data = mylib.load_geometry_data(
+            self.dirname,
+            spnum=self.spnum,
+            radial_mask=self.rmask,
+            components=['thetag', 'B', 'jacob_space']
+        )
+
+        self.thg = geom_data['thetag']
+        self.B = geom_data['B']
+        self.jacob_space = geom_data['jacob_space']
+
         print(f"Grid loaded: {len(self.rg)} radial points, {len(self.thg)} poloidal points")
     
     def _get_angle_indices(self, min_angle: float, max_angle: float) -> np.ndarray:
         """
         Get angle indices for specified range
-        
+
         Args:
             min_angle: Minimum angle in degrees
             max_angle: Maximum angle in degrees
-            
+
         Returns:
             Array of indices
         """
-        min_rad = np.deg2rad(min_angle) % (2 * np.pi)
-        max_rad = np.deg2rad(max_angle) % (2 * np.pi)
-        
-        angles_norm = self.thg % (2 * np.pi)
-        
-        if min_rad <= max_rad:
-            mask = (angles_norm >= min_rad) & (angles_norm <= max_rad)
-        else:  # Wrap around case
-            mask = (angles_norm >= min_rad) | (angles_norm <= max_rad)
-        
-        return np.where(mask)[0]
+        return mylib.get_angle_indices(self.thg, min_angle, max_angle,
+                                       in_degrees=True)
     
     def _reduce_3d_to_2d(self, data_3d: np.ndarray, 
                         reduction: Literal['mean', 'rms'] = 'mean') -> np.ndarray:
@@ -99,124 +93,117 @@ class Reynolds_stress_analyzer:
         else:
             raise ValueError(f"Unknown reduction: {reduction}")
     
-    def calc_RS_elec(self, timestep: int, 
+    def calc_RS_elec(self, timestep: int,
                     reduction: Literal['mean', 'rms'] = 'mean') -> np.ndarray:
         """
         Calculate electrostatic (ExB) component of Reynolds stress
-        
+
         Args:
             timestep: Time step index
             reduction: How to reduce phi dimension ('mean' or 'rms')
-            
+
         Returns:
             2D array [n_theta, n_r] of RS_elec
         """
         # Load 3D potential
         Phi3D = mylib.read_data(self.dirname, 'Phi_3D', t1=timestep-1501, spnum=self.spnum)
         Phi3D = Phi3D[:, :, self.rmask]  # Apply radial mask
-        
-        # Calculate gradients
-        dr_Phi3D = np.gradient(Phi3D, self.rg, axis=2)
-        dth_Phi3D = np.gradient(Phi3D, self.thg, axis=1)
-        
-        # ExB velocities (3D)
-        B_jacob = self.B * self.jacob_space
-        dr_vExB = -dth_Phi3D / B_jacob[np.newaxis, :, :]  # [phi, theta, r]
-        dth_vExB = dr_Phi3D / B_jacob[np.newaxis, :, :]
-        
-        # Reynolds stress components (3D)
-        RS1 = -dth_vExB * np.gradient(dr_vExB, self.rg, axis=2)
-        RS2 = dr_vExB * np.gradient(dth_vExB, self.thg, axis=1)
-        RS_3d = RS1 + RS2
-        
+
+        # Calculate ExB velocities using mylib function
+        dr_vExB, dth_vExB = mylib.calc_exb_velocity_2d(
+            Phi3D, self.rg, self.thg, self.B, self.jacob_space
+        )
+
+        # Calculate Reynolds stress using mylib function
+        RS_3d = mylib.calc_reynolds_stress_from_velocities(
+            dr_vExB, dth_vExB, self.rg, self.thg
+        )
+
         # Reduce to 2D
         return self._reduce_3d_to_2d(RS_3d, reduction)
     
     def calc_RS_diag(self, timestep: int) -> np.ndarray:
         """
         Calculate diamagnetic component of Reynolds stress
-        
+
         Args:
             timestep: Time step index
-            
+
         Returns:
             2D array [n_theta, n_r] of RS_diag
         """
-        # Load 2D pressure data
+        # Load 2D pressure and density data
         P_parallel, P_perp = mylib.read_data(
-            self.dirname, 'PparGC_rtheta', 'PperpGC_rtheta', 
+            self.dirname, 'PparGC_rtheta', 'PperpGC_rtheta',
             t1=timestep, spnum=self.spnum
         )
         dens_2D = mylib.read_data(
             self.dirname, 'densGC_rtheta', t1=timestep, spnum=self.spnum
         )
-        
+
         # Apply radial mask
         P_perp = P_perp[:, self.rmask]
         dens_2D = dens_2D[:, self.rmask]
-        
-        # Calculate gradients
-        dr_P_perp = np.gradient(P_perp, self.rg, axis=1)
-        dth_P_perp = np.gradient(P_perp, self.thg, axis=0)
-        
-        # Diamagnetic velocities
-        B_jacob = self.B * self.jacob_space
-        dr_vdiag = -dth_P_perp / (B_jacob * dens_2D)
-        dth_vdiag = dr_P_perp / (B_jacob * dens_2D)
-        
-        # Reynolds stress components
-        RS1 = -dth_vdiag * np.gradient(dr_vdiag, self.rg, axis=1)
-        RS2 = dr_vdiag * np.gradient(dth_vdiag, self.thg, axis=0)
-        
-        return RS1 + RS2
+
+        # Calculate diamagnetic velocities using mylib function
+        dr_vdiag, dth_vdiag = mylib.calc_diamagnetic_velocity_2d(
+            P_perp, dens_2D, self.rg, self.thg, self.B, self.jacob_space
+        )
+
+        # Calculate Reynolds stress using mylib function
+        RS_diag = mylib.calc_reynolds_stress_from_velocities(
+            dr_vdiag, dth_vdiag, self.rg, self.thg
+        )
+
+        return RS_diag
     
     def calc_RS_mix(self, timestep: int,
                    reduction: Literal['mean', 'rms'] = 'mean') -> np.ndarray:
         """
         Calculate mixed (ExB × diamagnetic) component of Reynolds stress
-        
+
         Args:
             timestep: Time step index
             reduction: How to reduce phi dimension
-            
+
         Returns:
             2D array [n_theta, n_r] of RS_mix
         """
-        # Load data
+        # Load 3D potential
         Phi3D = mylib.read_data(self.dirname, 'Phi_3D', t1=timestep-1501, spnum=self.spnum)
         Phi3D = Phi3D[:, :, self.rmask]
-        
+
+        # Load 2D pressure and density
         P_perp = mylib.read_data(
             self.dirname, 'PperpGC_rtheta', t1=timestep, spnum=self.spnum
         )[:, self.rmask]
-        
+
         dens_2D = mylib.read_data(
             self.dirname, 'densGC_rtheta', t1=timestep, spnum=self.spnum
         )[:, self.rmask]
-        
-        # Diamagnetic velocities (2D)
-        dr_P_perp = np.gradient(P_perp, self.rg, axis=1)
-        dth_P_perp = np.gradient(P_perp, self.thg, axis=0)
-        
-        B_jacob = self.B * self.jacob_space
-        dr_vdiag = -dth_P_perp / (B_jacob * dens_2D)
-        dth_vdiag = dr_P_perp / (B_jacob * dens_2D)
-        
-        # ExB velocities (3D)
-        dr_Phi3D = np.gradient(Phi3D, self.rg, axis=2)
-        dth_Phi3D = np.gradient(Phi3D, self.thg, axis=1)
-        
-        dr_vExB = -dth_Phi3D / B_jacob[np.newaxis, :, :]
-        dth_vExB = dr_Phi3D / B_jacob[np.newaxis, :, :]
-        
-        # Mixed terms (3D)
+
+        # Calculate diamagnetic velocities (2D) using mylib function
+        dr_vdiag, dth_vdiag = mylib.calc_diamagnetic_velocity_2d(
+            P_perp, dens_2D, self.rg, self.thg, self.B, self.jacob_space
+        )
+
+        # Calculate ExB velocities (3D) using mylib function
+        dr_vExB, dth_vExB = mylib.calc_exb_velocity_2d(
+            Phi3D, self.rg, self.thg, self.B, self.jacob_space
+        )
+
+        # Broadcast diamagnetic velocities to 3D for mixed term
         dr_vdiag_3d = dr_vdiag[np.newaxis, :, :]
         dth_vdiag_3d = dth_vdiag[np.newaxis, :, :]
-        
-        RS1 = -dth_vdiag_3d * np.gradient(dr_vExB, self.rg, axis=2)
-        RS2 = dr_vdiag_3d * np.gradient(dth_vExB, self.thg, axis=1)
-        RS_3d = RS1 + RS2
-        
+
+        # Calculate mixed Reynolds stress using mylib function
+        # Note: Using ExB velocity gradients with diamagnetic velocity
+        RS_3d = mylib.calc_reynolds_stress_from_velocities(
+            dr_vdiag_3d, dth_vExB, self.rg, self.thg
+        ) + mylib.calc_reynolds_stress_from_velocities(
+            dr_vExB, dth_vdiag_3d, self.rg, self.thg
+        )
+
         return self._reduce_3d_to_2d(RS_3d, reduction)
     
     def plot_RS_component(self, RS_data: np.ndarray, 
@@ -250,21 +237,19 @@ class Reynolds_stress_analyzer:
         # Create meshgrid
         theta_deg = np.rad2deg(self.thg)
         R, Theta = np.meshgrid(self.rg, theta_deg)
-        
-        # Auto-scale if not provided
-        if vmin is None or vmax is None:
-            abs_max = np.max(np.abs(RS_data))
-            vmin = -abs_max if vmin is None else vmin
-            vmax = abs_max if vmax is None else vmax
-        
+
+        # Auto-scale color limits using mylib function
+        vmin, vmax = mylib.auto_color_limits(RS_data, mode='symmetric',
+                                             vmin=vmin, vmax=vmax)
+
         # Plot
-        contour = ax.pcolormesh(R, Theta, RS_data, 
+        contour = ax.pcolormesh(R, Theta, RS_data,
                                cmap=colormap, vmin=vmin, vmax=vmax,
                                shading='gouraud')
-        
-        cbar = plt.colorbar(contour, ax=ax)
-        cbar.set_label(f'RS [{component_name}]', size=font_size+2)
-        cbar.ax.tick_params(labelsize=font_size)
+
+        # Add colorbar using mylib function
+        mylib.add_colorbar(contour, ax, label=f'RS [{component_name}]',
+                          font_size=font_size)
         
         ax.set_xlabel('r/a', size=font_size+2)
         ax.set_ylabel('θ [deg]', size=font_size+2)
@@ -297,22 +282,24 @@ class Reynolds_stress_analyzer:
         
         # Create figure
         fig, axes = plt.subplots(1, 3, figsize=(18, 5))
-        
-        # Common color scale
-        all_data = [RS_elec, RS_diag, RS_mix]
-        abs_max = max(np.max(np.abs(d)) for d in all_data)
-        
-        # Plot each component
-        self.plot_RS_component(RS_elec, 'ExB', timestep, 
-                              vmin=-abs_max, vmax=abs_max, 
+
+        # Determine common color scale using mylib function
+        all_data = np.concatenate([
+            RS_elec.ravel(), RS_diag.ravel(), RS_mix.ravel()
+        ])
+        vmin, vmax = mylib.auto_color_limits(all_data, mode='symmetric')
+
+        # Plot each component with common scale
+        self.plot_RS_component(RS_elec, 'ExB', timestep,
+                              vmin=vmin, vmax=vmax,
                               colormap=colormap, font_size=font_size,
                               ax=axes[0])
         self.plot_RS_component(RS_diag, 'Diamagnetic', timestep,
-                              vmin=-abs_max, vmax=abs_max,
+                              vmin=vmin, vmax=vmax,
                               colormap=colormap, font_size=font_size,
                               ax=axes[1])
         self.plot_RS_component(RS_mix, 'Mixed', timestep,
-                              vmin=-abs_max, vmax=abs_max,
+                              vmin=vmin, vmax=vmax,
                               colormap=colormap, font_size=font_size,
                               ax=axes[2])
         
