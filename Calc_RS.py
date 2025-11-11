@@ -99,13 +99,14 @@ class Reynolds_stress_analyzer:
         else:
             raise ValueError(f"Unknown reduction: {reduction}")
     
-    def calc_RS_elec(self, timestep: int) -> np.ndarray: 
-                    
+    def calc_RS_elec(self, timestep: int, 
+                    reduction: Literal['mean', 'rms'] = 'mean') -> np.ndarray:
         """
         Calculate electrostatic (ExB) component of Reynolds stress
         
         Args:
             timestep: Time step index
+            reduction: How to reduce phi dimension ('mean' or 'rms')
             
         Returns:
             2D array [n_theta, n_r] of RS_elec
@@ -124,19 +125,59 @@ class Reynolds_stress_analyzer:
         dth_vExB = dr_Phi3D / B_jacob[np.newaxis, :, :]
         
         # Reynolds stress components (3D)
-        RS_3d = dr_vExB * dth_vExB  # Placeholder for actual RS calculation
+        RS1 = -dth_vExB * np.gradient(dr_vExB, self.rg, axis=2)
+        RS2 = dr_vExB * np.gradient(dth_vExB, self.thg, axis=1)
+        RS_3d = RS1 + RS2
         
-        return RS_3d
         # Reduce to 2D
-        # return self._reduce_3d_to_2d(RS_3d, reduction)
+        return self._reduce_3d_to_2d(RS_3d, reduction)
     
+    def calc_RS_diag(self, timestep: int) -> np.ndarray:
+        """
+        Calculate diamagnetic component of Reynolds stress
+        
+        Args:
+            timestep: Time step index
+            
+        Returns:
+            2D array [n_theta, n_r] of RS_diag
+        """
+        # Load 2D pressure data
+        P_parallel, P_perp = mylib.read_data(
+            self.dirname, 'PparGC_rtheta', 'PperpGC_rtheta', 
+            t1=timestep, spnum=self.spnum
+        )
+        dens_2D = mylib.read_data(
+            self.dirname, 'densGC_rtheta', t1=timestep, spnum=self.spnum
+        )
+        
+        # Apply radial mask
+        P_perp = P_perp[:, self.rmask]
+        dens_2D = dens_2D[:, self.rmask]
+        
+        # Calculate gradients
+        dr_P_perp = np.gradient(P_perp, self.rg, axis=1)
+        dth_P_perp = np.gradient(P_perp, self.thg, axis=0)
+        
+        # Diamagnetic velocities
+        B_jacob = self.B * self.jacob_space
+        dr_vdiag = -dth_P_perp / (B_jacob * dens_2D)
+        dth_vdiag = dr_P_perp / (B_jacob * dens_2D)
+        
+        # Reynolds stress components
+        RS1 = -dth_vdiag * np.gradient(dr_vdiag, self.rg, axis=1)
+        RS2 = dr_vdiag * np.gradient(dth_vdiag, self.thg, axis=0)
+        
+        return RS1 + RS2
     
-    def calc_RS_mix(self, timestep: int) -> np.ndarray:
+    def calc_RS_mix(self, timestep: int,
+                   reduction: Literal['mean', 'rms'] = 'mean') -> np.ndarray:
         """
         Calculate mixed (ExB × diamagnetic) component of Reynolds stress
         
         Args:
             timestep: Time step index
+            reduction: How to reduce phi dimension
             
         Returns:
             2D array [n_theta, n_r] of RS_mix
@@ -172,10 +213,11 @@ class Reynolds_stress_analyzer:
         dr_vdiag_3d = dr_vdiag[np.newaxis, :, :]
         dth_vdiag_3d = dth_vdiag[np.newaxis, :, :]
         
-        RS_3d = dr_vdiag_3d * dth_vExB 
+        RS1 = -dth_vdiag_3d * np.gradient(dr_vExB, self.rg, axis=2)
+        RS2 = dr_vdiag_3d * np.gradient(dth_vExB, self.thg, axis=1)
+        RS_3d = RS1 + RS2
         
-        return RS_3d
-        # return self._reduce_3d_to_2d(RS_3d, reduction)
+        return self._reduce_3d_to_2d(RS_3d, reduction)
     
     def plot_RS_component(self, RS_data: np.ndarray, 
                          component_name: str,
@@ -249,18 +291,15 @@ class Reynolds_stress_analyzer:
         """
         # Calculate all components
         print(f"Calculating RS components for t={timestep}...")
-        RS_elec = self.calc_RS_elec(timestep)
-        RS_mix = self.calc_RS_mix(timestep)
-        
-        # Reduction
-        RS_elec = self._reduce_3d_to_2d(RS_elec, reduction)
-        RS_mix = self._reduce_3d_to_2d(RS_mix, reduction)
+        RS_elec = self.calc_RS_elec(timestep, reduction)
+        RS_diag = self.calc_RS_diag(timestep)
+        RS_mix = self.calc_RS_mix(timestep, reduction)
         
         # Create figure
         fig, axes = plt.subplots(1, 3, figsize=(18, 5))
         
         # Common color scale
-        all_data = [RS_elec, RS_mix]
+        all_data = [RS_elec, RS_diag, RS_mix]
         abs_max = max(np.max(np.abs(d)) for d in all_data)
         
         # Plot each component
@@ -268,6 +307,10 @@ class Reynolds_stress_analyzer:
                               vmin=-abs_max, vmax=abs_max, 
                               colormap=colormap, font_size=font_size,
                               ax=axes[0])
+        self.plot_RS_component(RS_diag, 'Diamagnetic', timestep,
+                              vmin=-abs_max, vmax=abs_max,
+                              colormap=colormap, font_size=font_size,
+                              ax=axes[1])
         self.plot_RS_component(RS_mix, 'Mixed', timestep,
                               vmin=-abs_max, vmax=abs_max,
                               colormap=colormap, font_size=font_size,
@@ -303,6 +346,7 @@ class Reynolds_stress_analyzer:
         """
         # Calculate all components
         RS_elec = self.calc_RS_elec(timestep, reduction)
+        RS_diag = self.calc_RS_diag(timestep)
         RS_mix = self.calc_RS_mix(timestep, reduction)
         
         fig, ax = plt.subplots(figsize=(10, 6))
@@ -310,6 +354,7 @@ class Reynolds_stress_analyzer:
         if min_angle is None or max_angle is None:
             # Full theta average
             RS_elec_prof = np.mean(RS_elec, axis=0)
+            RS_diag_prof = np.mean(RS_diag, axis=0)
             RS_mix_prof = np.mean(RS_mix, axis=0)
             title_suffix = "(θ-averaged)"
         else:
@@ -321,12 +366,14 @@ class Reynolds_stress_analyzer:
                 return None, None
             
             RS_elec_prof = np.mean(RS_elec[angle_indices, :], axis=0)
+            RS_diag_prof = np.mean(RS_diag[angle_indices, :], axis=0)
             RS_mix_prof = np.mean(RS_mix[angle_indices, :], axis=0)
-            RS_total_prof = RS_elec_prof + RS_mix_prof
+            RS_total_prof = RS_elec_prof + RS_diag_prof + RS_mix_prof
             title_suffix = f"(θ ∈ [{min_angle:.0f}°, {max_angle:.0f}°])"
         
         # Plot
         ax.plot(self.rg, RS_elec_prof, 'o-', label='ExB', linewidth=2, markersize=4)
+        ax.plot(self.rg, RS_diag_prof, 's-', label='Diamagnetic', linewidth=2, markersize=4)
         ax.plot(self.rg, RS_mix_prof, '^-', label='Mixed', linewidth=2, markersize=4)
         ax.plot(self.rg, RS_total_prof, 'k--', label='Total', linewidth=2)
         ax.axhline(0, color='k', linestyle='--', alpha=0.3)
