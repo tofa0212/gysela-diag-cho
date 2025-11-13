@@ -398,7 +398,205 @@ def apply_time_window(data_2d: np.ndarray,
 # ============================================================================
 # Common Data Loading Functions
 # ============================================================================
-def load_common_geometry(dirname: str, spnum: int = 0, 
+def load_normalized_grid(dirname: str, spnum: int = 0,
+                        r_min: float = 0.0, r_max: float = np.inf,
+                        return_mask: bool = False) -> Dict[str, Any]:
+    """
+    Load and normalize radial grid with optional range selection.
+
+    This is the most commonly used grid loading pattern, appearing in 13+ files.
+
+    Args:
+        dirname: Base directory path
+        spnum: Species number
+        r_min: Minimum normalized radial coordinate
+        r_max: Maximum normalized radial coordinate
+        return_mask: If True, return boolean mask; if False, return indices
+
+    Returns:
+        Dictionary containing:
+            - 'rg': Normalized and selected radial grid array
+            - 'rg_full': Full normalized radial grid (before selection)
+            - 'R0': Normalized major radius
+            - 'rhostar': rho_star normalization factor
+            - 'mask': Boolean mask or indices for selected range
+
+    Example:
+        >>> grid = load_normalized_grid('/path/to/data', r_min=0.7, r_max=1.2)
+        >>> rg = grid['rg']
+        >>> R0 = grid['R0']
+    """
+    # Load basic grid data
+    rg_raw = read_data(dirname, 'rg', spnum=spnum)
+    R0, rhostar = read_data(dirname, 'R0', 'rhostar', spnum=spnum)
+
+    # Normalize
+    rg_normalized = rg_raw * rhostar
+    R0_normalized = R0 * rhostar
+
+    # Create mask/indices for selected range
+    if return_mask:
+        mask = (rg_normalized >= r_min) & (rg_normalized <= r_max)
+    else:
+        mask = np.squeeze(np.where((rg_normalized >= r_min) & (rg_normalized <= r_max)))
+
+    # Select radial range
+    rg_selected = rg_normalized[mask]
+
+    return {
+        'rg': rg_selected,
+        'rg_full': rg_normalized,
+        'R0': R0_normalized,
+        'rhostar': rhostar,
+        'mask': mask,
+    }
+
+
+def load_temperature_profile(dirname: str, timestep: int, spnum: int = 0,
+                            radial_mask: Optional[np.ndarray] = None,
+                            return_components: bool = False) -> Union[
+                                np.ndarray, Tuple[np.ndarray, np.ndarray, np.ndarray]
+                            ]:
+    """
+    Load temperature profile (T = P/n) at given timestep.
+
+    Common pattern appearing in 8+ files for loading ion/electron temperature.
+
+    Args:
+        dirname: Base directory path
+        timestep: Time step index
+        spnum: Species number (0=ions, 1=electrons)
+        radial_mask: Optional mask/indices to select radial points
+        return_components: If True, return (P, n, T); if False, return T only
+
+    Returns:
+        If return_components=False: Temperature array
+        If return_components=True: Tuple of (pressure, density, temperature)
+
+    Example:
+        >>> Ti = load_temperature_profile('/path/to/data', timestep=100)
+        >>> P, n, Ti = load_temperature_profile('/path/to/data', 100,
+        ...                                      return_components=True)
+    """
+    # Load pressure and density
+    P, n = read_data(dirname, 'stress_FSavg', 'dens_FSavg',
+                    t1=timestep, spnum=spnum)
+
+    # Calculate temperature
+    T = P / n
+
+    # Apply radial mask if provided
+    if radial_mask is not None:
+        P = P[radial_mask]
+        n = n[radial_mask]
+        T = T[radial_mask]
+
+    if return_components:
+        return P, n, T
+    else:
+        return T
+
+
+def load_2d_temperature(dirname: str, timestep: int, spnum: int = 0,
+                       radial_mask: Optional[np.ndarray] = None,
+                       angle_mask: Optional[np.ndarray] = None,
+                       return_density: bool = False) -> Union[
+                           Tuple[np.ndarray, np.ndarray],
+                           Tuple[np.ndarray, np.ndarray, np.ndarray]
+                       ]:
+    """
+    Load 2D temperature fields with anisotropy (parallel/perpendicular).
+
+    Common pattern for loading 2D temperature data from GC moments.
+
+    Args:
+        dirname: Base directory path
+        timestep: Time step index
+        spnum: Species number
+        radial_mask: Optional mask for radial selection
+        angle_mask: Optional mask for angular selection
+        return_density: If True, also return density field
+
+    Returns:
+        If return_density=False: (T_par, T_perp)
+        If return_density=True: (T_par, T_perp, density)
+
+    Example:
+        >>> T_par, T_perp = load_2d_temperature('/path/to/data', timestep=100)
+        >>> T_par, T_perp, n = load_2d_temperature('/path/to/data', 100,
+        ...                                         return_density=True)
+    """
+    # Load pressure components and density
+    P_par, P_perp, dens = read_data(
+        dirname, 'PparGC_rtheta', 'PperpGC_rtheta', 'densGC_rtheta',
+        t1=timestep, spnum=spnum
+    )
+
+    # Calculate temperatures
+    T_par = P_par / dens
+    T_perp = P_perp / dens
+
+    # Apply masks if provided
+    if radial_mask is not None:
+        T_par = T_par[:, radial_mask]
+        T_perp = T_perp[:, radial_mask]
+        dens = dens[:, radial_mask]
+
+    if angle_mask is not None:
+        T_par = T_par[angle_mask, :]
+        T_perp = T_perp[angle_mask, :]
+        dens = dens[angle_mask, :]
+
+    if return_density:
+        return T_par, T_perp, dens
+    else:
+        return T_par, T_perp
+
+
+def load_geometry_data(dirname: str, spnum: int = 0,
+                      radial_mask: Optional[np.ndarray] = None,
+                      components: Optional[List[str]] = None) -> Dict[str, np.ndarray]:
+    """
+    Load geometry data with optional masking.
+
+    Args:
+        dirname: Base directory path
+        spnum: Species number
+        radial_mask: Optional mask for radial selection
+        components: List of components to load. Default: ['B', 'jacob_space', 'thetag']
+                   Available: 'B', 'jacob_space', 'thetag', 'R', 'Z', 'psi',
+                             'B_gradtheta', 'B_gradphi', 'Btheta'
+
+    Returns:
+        Dictionary with requested components, properly masked
+
+    Example:
+        >>> geom = load_geometry_data('/path/to/data',
+        ...                           components=['B', 'jacob_space', 'thetag'])
+        >>> B = geom['B']
+        >>> jacob = geom['jacob_space']
+    """
+    if components is None:
+        components = ['B', 'jacob_space', 'thetag']
+
+    # Load requested components
+    data = {}
+    for comp in components:
+        data[comp] = read_data(dirname, comp, spnum=spnum)
+
+    # Apply radial mask to 2D arrays if provided
+    if radial_mask is not None:
+        for key, value in data.items():
+            if value.ndim == 2:
+                data[key] = value[:, radial_mask]
+            elif value.ndim == 1 and len(value) > len(np.atleast_1d(radial_mask)):
+                # For 1D arrays that match radial dimension
+                data[key] = value[radial_mask]
+
+    return data
+
+
+def load_common_geometry(dirname: str, spnum: int = 0,
                         min_r: float = 0.7, max_r: float = 1.1) -> Dict[str, Any]:
     """
     Load common geometry data for analysis.
@@ -457,7 +655,67 @@ def load_common_geometry(dirname: str, spnum: int = 0,
     }
 
 
-def setup_angle_analysis(bal_ang: np.ndarray, 
+def get_angle_indices(angles: np.ndarray,
+                     min_angle: float,
+                     max_angle: float,
+                     in_degrees: bool = True) -> np.ndarray:
+    """
+    Get indices for angle range with automatic wrap-around handling.
+
+    This common pattern appears in 7+ files. Handles wrap-around cases
+    (e.g., [-30°, 30°] crossing 0) automatically.
+
+    Args:
+        angles: Angle array (radians or degrees depending on in_degrees)
+        min_angle: Minimum angle
+        max_angle: Maximum angle
+        in_degrees: If True, inputs are in degrees; if False, in radians
+
+    Returns:
+        Array of indices within specified range
+
+    Raises:
+        ValueError: If no angles found in specified range
+
+    Example:
+        >>> theta_indices = get_angle_indices(theta_grid, -30, 30, in_degrees=True)
+        >>> data_selected = data[theta_indices, :]
+    """
+    # Convert to radians if needed
+    if in_degrees:
+        min_rad = np.deg2rad(min_angle)
+        max_rad = np.deg2rad(max_angle)
+        angle_rad = angles if not in_degrees else np.deg2rad(angles)
+    else:
+        min_rad = min_angle
+        max_rad = max_angle
+        angle_rad = angles
+
+    # Normalize to [0, 2π) for robust comparison
+    angles_norm = angle_rad % (2 * np.pi)
+    min_norm = min_rad % (2 * np.pi)
+    max_norm = max_rad % (2 * np.pi)
+
+    # Handle wrap-around
+    if min_norm <= max_norm:
+        mask = (angles_norm >= min_norm) & (angles_norm <= max_norm)
+    else:
+        # Wrap-around case: angles >= min OR angles <= max
+        mask = (angles_norm >= min_norm) | (angles_norm <= max_norm)
+
+    indices = np.where(mask)[0]
+
+    if len(indices) == 0:
+        raise ValueError(
+            f"No angles found in range [{min_angle}, {max_angle}]. "
+            f"Available angle range: [{np.rad2deg(angle_rad.min()):.1f}°, "
+            f"{np.rad2deg(angle_rad.max()):.1f}°]"
+        )
+
+    return indices
+
+
+def setup_angle_analysis(bal_ang: np.ndarray,
                         min_angle_deg: float = -30.0,
                         max_angle_deg: float = 30.0) -> np.ndarray:
     """
@@ -550,6 +808,185 @@ def load_and_select_data(dirname: str, dtype: str, t1: int,
         data = data[xind] if len(data) > len(xind) else data
     
     return data
+
+
+# ============================================================================
+# Physical Calculations
+# ============================================================================
+def calc_gradient_scale_length(profile: np.ndarray,
+                               radial_grid: np.ndarray,
+                               R0: float) -> np.ndarray:
+    """
+    Calculate inverse gradient scale length R/L_X = -R0 * (dX/dr) / X
+
+    Common pattern appearing in 6+ files for calculating gradient scale
+    lengths of temperature, density, or pressure profiles.
+
+    Args:
+        profile: Quantity profile (T, n, P, etc.) [n_radial]
+        radial_grid: Radial coordinate array [n_radial]
+        R0: Major radius normalization factor
+
+    Returns:
+        R_over_L: Inverse gradient scale length [n_radial]
+
+    Example:
+        >>> Ti = load_temperature_profile(dirname, timestep)
+        >>> RLT = calc_gradient_scale_length(Ti, rg, R0)
+    """
+    # Calculate gradient
+    grad = np.gradient(profile, radial_grid)
+
+    # Calculate R/L with safe division
+    with np.errstate(divide='ignore', invalid='ignore'):
+        R_over_L = -grad / profile * R0
+        # Set to 0 where profile is 0
+        R_over_L = np.nan_to_num(R_over_L, nan=0.0, posinf=0.0, neginf=0.0)
+
+    return R_over_L
+
+
+def calc_exb_velocity_2d(phi: np.ndarray,
+                        rg: np.ndarray,
+                        thetag: np.ndarray,
+                        B: np.ndarray,
+                        jacob_space: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Calculate ExB velocity components from electrostatic potential.
+
+    Common pattern in Reynolds stress and transport calculations.
+
+    Args:
+        phi: Electrostatic potential [n_phi, n_theta, n_r] or [n_theta, n_r]
+        rg: Radial grid
+        thetag: Poloidal angle grid
+        B: Magnetic field magnitude
+        jacob_space: Jacobian of coordinate transformation
+
+    Returns:
+        v_r: Radial ExB velocity (same shape as phi)
+        v_theta: Poloidal ExB velocity (same shape as phi)
+
+    Formula:
+        v_r = -dPhi/dtheta / (B * J)
+        v_theta = dPhi/dr / (B * J)
+
+    Example:
+        >>> Phi3D = mylib.read_data(dirname, 'Phi_3D', t1=timestep)
+        >>> v_r, v_theta = calc_exb_velocity_2d(Phi3D, rg, thetag, B, jacob)
+    """
+    # Determine dimensionality
+    is_3d = (phi.ndim == 3)
+
+    # Calculate gradients
+    if is_3d:
+        dr_phi = np.gradient(phi, rg, axis=2)
+        dth_phi = np.gradient(phi, thetag, axis=1)
+    else:
+        dr_phi = np.gradient(phi, rg, axis=1)
+        dth_phi = np.gradient(phi, thetag, axis=0)
+
+    # Calculate B * J
+    B_jacob = B * jacob_space
+
+    # Calculate velocities
+    if is_3d:
+        v_r = -dth_phi / B_jacob[np.newaxis, :, :]
+        v_theta = dr_phi / B_jacob[np.newaxis, :, :]
+    else:
+        v_r = -dth_phi / B_jacob
+        v_theta = dr_phi / B_jacob
+
+    return v_r, v_theta
+
+
+def calc_diamagnetic_velocity_2d(pressure: np.ndarray,
+                                 density: np.ndarray,
+                                 rg: np.ndarray,
+                                 thetag: np.ndarray,
+                                 B: np.ndarray,
+                                 jacob_space: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Calculate diamagnetic velocity components from pressure and density.
+
+    Common pattern in Reynolds stress and transport calculations.
+
+    Args:
+        pressure: Pressure field [n_theta, n_r]
+        density: Density field [n_theta, n_r]
+        rg: Radial grid
+        thetag: Poloidal angle grid
+        B: Magnetic field magnitude
+        jacob_space: Jacobian of coordinate transformation
+
+    Returns:
+        v_r: Radial diamagnetic velocity [n_theta, n_r]
+        v_theta: Poloidal diamagnetic velocity [n_theta, n_r]
+
+    Formula:
+        v_r = -dP/dtheta / (B * J * n)
+        v_theta = dP/dr / (B * J * n)
+
+    Example:
+        >>> P_perp, n = mylib.read_data(dirname, 'PperpGC_rtheta',
+        ...                              'densGC_rtheta', t1=timestep)
+        >>> v_r, v_theta = calc_diamagnetic_velocity_2d(P_perp, n, rg, thetag,
+        ...                                              B, jacob)
+    """
+    # Calculate gradients of pressure
+    dr_P = np.gradient(pressure, rg, axis=1)
+    dth_P = np.gradient(pressure, thetag, axis=0)
+
+    # Calculate B * J * n
+    B_jacob_n = B * jacob_space * density
+
+    # Calculate velocities
+    v_r = -dth_P / B_jacob_n
+    v_theta = dr_P / B_jacob_n
+
+    return v_r, v_theta
+
+
+def calc_reynolds_stress_from_velocities(v_r: np.ndarray,
+                                         v_theta: np.ndarray,
+                                         rg: np.ndarray,
+                                         thetag: np.ndarray) -> np.ndarray:
+    """
+    Calculate Reynolds stress from velocity field.
+
+    Formula: RS = -v_theta * d(v_r)/dr + v_r * d(v_theta)/dtheta
+
+    Args:
+        v_r: Radial velocity component
+        v_theta: Poloidal velocity component
+        rg: Radial grid
+        thetag: Poloidal angle grid
+
+    Returns:
+        RS: Reynolds stress field (same shape as velocities)
+
+    Example:
+        >>> v_r_ExB, v_theta_ExB = calc_exb_velocity_2d(...)
+        >>> RS_ExB = calc_reynolds_stress_from_velocities(v_r_ExB, v_theta_ExB,
+        ...                                               rg, thetag)
+    """
+    # Determine dimensionality
+    is_3d = (v_r.ndim == 3)
+
+    if is_3d:
+        # 3D case: [n_phi, n_theta, n_r]
+        dr_vr = np.gradient(v_r, rg, axis=2)
+        dth_vtheta = np.gradient(v_theta, thetag, axis=1)
+    else:
+        # 2D case: [n_theta, n_r]
+        dr_vr = np.gradient(v_r, rg, axis=1)
+        dth_vtheta = np.gradient(v_theta, thetag, axis=0)
+
+    # Calculate Reynolds stress components
+    RS1 = -v_theta * dr_vr
+    RS2 = v_r * dth_vtheta
+
+    return RS1 + RS2
 
 
 # ============================================================================
@@ -772,6 +1209,98 @@ def init_plot_params(figsize: Tuple[float, float] = (8, 6),
     return fig, ax
 
 
+def auto_color_limits(data: np.ndarray,
+                     mode: str = 'symmetric',
+                     percentile: float = 99,
+                     vmin: Optional[float] = None,
+                     vmax: Optional[float] = None) -> Tuple[float, float]:
+    """
+    Calculate color scale limits automatically.
+
+    Common pattern appearing in 8+ files for setting color limits.
+
+    Args:
+        data: Data array for color mapping
+        mode: Scaling mode - 'symmetric', 'positive', or 'percentile'
+        percentile: Percentile for outlier removal (used in 'percentile' mode)
+        vmin: Override minimum (if provided, ignores mode)
+        vmax: Override maximum (if provided, ignores mode)
+
+    Returns:
+        (vmin, vmax): Color scale limits
+
+    Modes:
+        'symmetric': ±max(abs(data)) for diverging colormaps (RdBu_r, etc.)
+        'positive': 0 to max for sequential colormaps
+        'percentile': Based on percentiles to ignore outliers
+
+    Example:
+        >>> vmin, vmax = auto_color_limits(data, mode='symmetric')
+        >>> plt.pcolormesh(X, Y, data, vmin=vmin, vmax=vmax, cmap='RdBu_r')
+    """
+    # Handle provided values
+    if vmin is not None and vmax is not None:
+        return vmin, vmax
+
+    # Remove NaN/Inf for calculations
+    valid_data = data[np.isfinite(data)]
+
+    if len(valid_data) == 0:
+        return 0.0, 1.0  # Fallback
+
+    if mode == 'symmetric':
+        abs_max = np.max(np.abs(valid_data))
+        calc_vmin = -abs_max
+        calc_vmax = abs_max
+    elif mode == 'positive':
+        calc_vmin = 0.0
+        calc_vmax = np.max(valid_data)
+    elif mode == 'percentile':
+        calc_vmin = np.percentile(valid_data, 100 - percentile)
+        calc_vmax = np.percentile(valid_data, percentile)
+    else:
+        raise ValueError(f"Unknown mode: {mode}. Use 'symmetric', 'positive', or 'percentile'")
+
+    # Override with provided values
+    final_vmin = vmin if vmin is not None else calc_vmin
+    final_vmax = vmax if vmax is not None else calc_vmax
+
+    return final_vmin, final_vmax
+
+
+def add_colorbar(mappable, ax: plt.Axes,
+                label: str = '',
+                font_size: int = 12,
+                **kwargs) -> plt.colorbar.Colorbar:
+    """
+    Add consistently formatted colorbar to plot.
+
+    Common pattern appearing in 10+ files.
+
+    Args:
+        mappable: Matplotlib mappable object (result of pcolormesh, contourf, etc.)
+        ax: Axes to attach colorbar to
+        label: Colorbar label text
+        font_size: Font size for label and ticks
+        **kwargs: Additional arguments passed to plt.colorbar()
+
+    Returns:
+        cbar: Colorbar object
+
+    Example:
+        >>> mesh = ax.pcolormesh(X, Y, data, cmap='RdBu_r')
+        >>> cbar = add_colorbar(mesh, ax, label='Temperature [eV]', font_size=14)
+    """
+    cbar = plt.colorbar(mappable, ax=ax, **kwargs)
+
+    if label:
+        cbar.set_label(label, size=font_size + 2)
+
+    cbar.ax.tick_params(labelsize=font_size)
+
+    return cbar
+
+
 def fin_plot_params(fig: plt.Figure, ax: plt.Axes) -> None:
     """
     Finalize plot layout.
@@ -975,7 +1504,7 @@ def float_to_fraction2(value: float, base: float, cdenom: int) -> str:
 # ============================================================================
 # Module Info
 # ============================================================================
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 __all__ = [
     # Configuration
     'set_fallback_dir',
@@ -985,9 +1514,19 @@ __all__ = [
     'read_data',
     'count_files',
     # Common data loading
+    'load_normalized_grid',
+    'load_temperature_profile',
+    'load_2d_temperature',
+    'load_geometry_data',
     'load_common_geometry',
+    'get_angle_indices',
     'setup_angle_analysis',
     'load_and_select_data',
+    # Physical calculations
+    'calc_gradient_scale_length',
+    'calc_exb_velocity_2d',
+    'calc_diamagnetic_velocity_2d',
+    'calc_reynolds_stress_from_velocities',
     # Signal processing
     'fft_filter',
     'mode_decomp',
@@ -1005,6 +1544,8 @@ __all__ = [
     'setup_contour_plot',
     'set_time_axis_ticks',
     'add_side_sine_wave',
+    'auto_color_limits',
+    'add_colorbar',
     # Formatting
     'sci_note',
     'float_to_fraction',
