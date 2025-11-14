@@ -20,17 +20,20 @@ class TemperatureFluctuationAnalyzer:
         
     def _load_geometry(self):
         """Load radial grid and normalization constants"""
-        self.rg = mylib.read_data(self.dirname, 'rg')
-        self.R0, self.rhostar = mylib.read_data(self.dirname, 'R0', 'rhostar')
-        
-        # Normalize radial coordinate
-        self.rg *= self.rhostar
-        self.R0 *= self.rhostar
-        
-        # Select radial range
-        self.xind = np.where((self.rg < self.max_r) & (self.rg > self.min_r))[0]
-        self.rg = self.rg[self.xind]
-        
+        # Use mylib function to load normalized grid
+        grid_data = mylib.load_normalized_grid(
+            self.dirname,
+            spnum=0,  # Default to ions
+            r_min=self.min_r,
+            r_max=self.max_r,
+            return_mask=False
+        )
+
+        self.rg = grid_data['rg']
+        self.R0 = grid_data['R0']
+        self.rhostar = grid_data['rhostar']
+        self.xind = grid_data['mask']
+
         print(f"Radial range: {self.min_r:.2f} < r < {self.max_r:.2f}")
         print(f"Number of radial points: {len(self.rg)}")
         

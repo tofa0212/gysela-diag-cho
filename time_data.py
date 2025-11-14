@@ -43,48 +43,42 @@ class ContourAnalyzer:
         
     def _load_common_data(self):
         """Load geometry and grid data"""
-        self.rg = mylib.read_data(self.dirname, 'rg')
-        self.R0, self.inv_rho = mylib.read_data(self.dirname, 'R0', 'rhostar')
-        
-        # Normalize radial coordinate
-        self.rg *= self.inv_rho
-        
-        # Select radial range
-        self.xind = np.squeeze(np.where((self.rg <= self.max_r) & (self.rg >= self.min_r)))
-        self.R0 *= self.inv_rho
-        self.rg = self.rg[self.xind]
-        
+        # Use mylib function to load normalized grid
+        grid_data = mylib.load_normalized_grid(
+            self.dirname,
+            spnum=self.spnum,
+            r_min=self.min_r,
+            r_max=self.max_r,
+            return_mask=False
+        )
+
+        self.rg = grid_data['rg']
+        self.R0 = grid_data['R0']
+        self.inv_rho = grid_data['rhostar']
+        self.xind = grid_data['mask']
+
         # Load ballooning angle data
         self.bal_ang = mylib.esti_bal_angle(self.dirname)
         self.bal_ang = self.bal_ang[:, self.xind]
-        
+
         # Setup angle analysis
         self._setup_angle_analysis()
         
     def _setup_angle_analysis(self):
-        """Setup angle indices for analysis"""
+        """Setup angle indices for analysis using mylib function"""
         angles_rad = self.bal_ang[:, 0]  # Use angles from the first radial point
-        
-        # Convert degree range to radians
-        min_angle_rad = np.deg2rad(self.min_angle_deg)
-        max_angle_rad = np.deg2rad(self.max_angle_deg)
-        
-        # Normalize angles and range to [0, 2*pi) for robust comparison
-        angles_norm = angles_rad % (2 * np.pi)
-        min_angle_norm = min_angle_rad % (2 * np.pi)
-        max_angle_norm = max_angle_rad % (2 * np.pi)
-        
-        if min_angle_norm <= max_angle_norm:
-            # Normal case: min_angle <= angles <= max_angle
-            angle_mask = (angles_norm >= min_angle_norm) & (angles_norm <= max_angle_norm)
-        else:
-            # Wrap-around case: angles >= min_angle OR angles <= max_angle
-            angle_mask = (angles_norm >= min_angle_norm) | (angles_norm <= max_angle_norm)
-            
-        self.angle_indices = np.where(angle_mask)[0]
-        
-        if len(self.angle_indices) == 0:
-            print(f"Warning: No angles found in the specified range [{self.min_angle_deg}, {self.max_angle_deg}] degrees.")
+
+        # Use mylib function for angle selection with wrap-around handling
+        try:
+            self.angle_indices = mylib.get_angle_indices(
+                angles_rad,
+                self.min_angle_deg,
+                self.max_angle_deg,
+                in_degrees=True
+            )
+        except ValueError as e:
+            print(f"Warning: {e}")
+            self.angle_indices = np.array([], dtype=int)
     
     def load_reference_data(self, ref_time: int, apply_fft_filter: bool = True, 
                            fft_filter_modes: int = 1):
