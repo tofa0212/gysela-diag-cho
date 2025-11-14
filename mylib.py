@@ -1271,7 +1271,7 @@ def auto_color_limits(data: np.ndarray,
 def add_colorbar(mappable, ax: plt.Axes,
                 label: str = '',
                 font_size: int = 12,
-                **kwargs) -> plt.colorbar.Colorbar:
+                **kwargs) -> plt.colorbar:
     """
     Add consistently formatted colorbar to plot.
 
