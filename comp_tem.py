@@ -42,18 +42,23 @@ class TemperatureProfileAnalyzer:
     
     def _load_grid_data(self):
         """Load radial grid and normalization parameters"""
-        self.rg = mylib.read_data(self.dirname, 'rg')
-        self.rhostar = mylib.read_data(self.dirname, 'rhostar')
-        self.rg *= self.rhostar
-        
-        # Apply radial mask
-        self.xind = np.where((self.rg >= self.r_min) & (self.rg <= self.r_max))[0]
-        self.rg = self.rg[self.xind]
-        
-        # Normalization
-        self.R0, self.Ts0 = mylib.read_data(self.dirname, 'R0', 'Ts0')
-        self.R0 *= self.rhostar
-        
+        # Use mylib function to load normalized grid
+        grid_data = mylib.load_normalized_grid(
+            self.dirname,
+            spnum=0,  # Default to ions
+            r_min=self.r_min,
+            r_max=self.r_max,
+            return_mask=False
+        )
+
+        self.rg = grid_data['rg']
+        self.R0 = grid_data['R0']
+        self.rhostar = grid_data['rhostar']
+        self.xind = grid_data['mask']
+
+        # Load Ts0 separately (not in grid_data)
+        self.Ts0 = mylib.read_data(self.dirname, 'Ts0')
+
         print(f"Grid loaded: {len(self.rg)} radial points")
 
         # Load ballooning angle data
@@ -65,29 +70,20 @@ class TemperatureProfileAnalyzer:
             self._setup_angle_analysis()
 
     def _setup_angle_analysis(self):
-        """Setup angle indices for analysis"""
+        """Setup angle indices for analysis using mylib function"""
         angles_rad = self.bal_ang[:, 0]  # Use angles from the first radial point
 
-        # Convert degree range to radians
-        min_angle_rad = np.deg2rad(self.min_angle)
-        max_angle_rad = np.deg2rad(self.max_angle)
-
-        # Normalize angles and range to [0, 2*pi) for robust comparison
-        angles_norm = angles_rad % (2 * np.pi)
-        min_angle_norm = min_angle_rad % (2 * np.pi)
-        max_angle_norm = max_angle_rad % (2 * np.pi)
-
-        if min_angle_norm <= max_angle_norm:
-        # Normal case: min_angle <= angles <= max_angle
-            angle_mask = (angles_norm >= min_angle_norm) & (angles_norm <= max_angle_norm)
-        else:
-        # Wrap-around case: angles >= min_angle OR angles <= max_angle
-            angle_mask = (angles_norm >= min_angle_norm) | (angles_norm <= max_angle_norm)
-
-        self.angle_indices = np.where(angle_mask)[0]
-
-        if len(self.angle_indices) == 0:
-            print(f"Warning: No angles found in the specified range [{self.min_angle_deg}, {self.max_angle_deg}] degrees.")
+        # Use mylib function for angle selection with wrap-around handling
+        try:
+            self.angle_indices = mylib.get_angle_indices(
+                angles_rad,
+                self.min_angle,
+                self.max_angle,
+                in_degrees=True
+            )
+        except ValueError as e:
+            print(f"Warning: {e}")
+            self.angle_indices = np.array([], dtype=int)
 
     
     def _load_reference_data(self):
@@ -179,16 +175,15 @@ class TemperatureProfileAnalyzer:
     def calc_gradient_scale_length(self, Ti: np.ndarray) -> np.ndarray:
         """
         Calculate inverse gradient scale length R/L_T
-        
+
         Args:
             Ti: Temperature profile
-            
+
         Returns:
             R/L_T profile
         """
-        grad_Ti = np.gradient(Ti, self.rg)
-        RLT = -grad_Ti / Ti * self.R0
-        return RLT
+        # Use mylib function for gradient scale length calculation
+        return mylib.calc_gradient_scale_length(Ti, self.rg, self.R0)
     
     def calc_heat_flux_profile(self, timesteps: List[int]) -> np.ndarray:
         """
